@@ -1,0 +1,91 @@
+#!/usr/bin/python3
+
+import socket
+import argparse
+import sys
+
+
+def xsend(con, msg):
+    con.sendall(msg.encode())
+    print(msg)
+
+
+# claws recurser with -r or -r -l (variant 2):
+# https://www.thewildbeast.co.uk/claws-mail/bugzilla/show_bug.cgi?id=4313
+#
+# balsa nullptr with -p:
+# https://gitlab.gnome.org/GNOME/balsa/issues/23
+#
+# evolution nullptr with -n/--nocap:
+# https://gitlab.gnome.org/GNOME/evolution-data-server/issues/189
+
+parser = argparse.ArgumentParser()
+parser.add_argument("-p", "--preauth", action="store_true")
+parser.add_argument("-r", "--recursive", action="store_true")
+parser.add_argument("-l", "--limitrecursion", action="store_true")
+parser.add_argument("-n", "--nocap", action="store_true")
+o = parser.parse_args()
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(('127.0.0.1', 143))
+    s.listen()
+    c, addr = s.accept()
+    with c:
+        print("connection by ", addr)
+        if o.preauth:
+            print("using preauth")
+            xsend(c, "* PREAUTH [CAPABILITY IMAP4rev1 ANONYMOUS SASL-IR LOGIN-REFERRALS ID ENABLE IDLE LITERAL+ AUTH=] fakemap ready.\r\n")
+        else:
+            if o.nocap:
+                xsend(c, "* OK [x] fakemap ready.\r\n")
+            else:
+                xsend(c, "* OK [CAPABILITY IMAP4rev1 ANONYMOUS SASL-IR LOGIN-REFERRALS ID ENABLE IDLE LITERAL+ AUTH=] fakemap ready.\r\n")
+        reccount = 0
+        while True:
+            data = c.recv(1024 * 256).decode('utf-8').rstrip()
+            if not data:
+                print("no data")
+                break
+            print(data)
+
+            cmds = data.split(' ')
+            if len(cmds) <= 1:
+                continue
+            print("command received: " + cmds[1])
+            if cmds[1] == 'CAPABILITY':
+                print("capability command")
+                if o.nocap:
+                    send1 = cmds[0] + " OK CAPABILITY comp\r\n"
+                    xsend(c, send1)
+                else:
+                    send1 = "* CAPABILITY IMAP4rev1 ANONYMOUS SASL-IR LOGIN-REFERRALS ID ENABLE IDLE LITERAL+ AUTH=plain\r\n"
+                    send1 += cmds[0] + " OK CAPABILITY comp\r\n"
+                    xsend(c, send1)
+            elif cmds[1] == 'LOGIN':
+                print("login")
+                # send1 = cmds[0] + " " + "NO [AUTHENTICATIONFAILED] Authentication failed.\r\n"
+                send1 = cmds[0] + " " + "OK [CAPABILITY IMAP4rev1 SASL-IR LOGIN-REFERRALS ID ENABLE IDLE SORT SORT=DISPLAY THREAD=REFERENCES THREAD=REFS THREAD=ORDEREDSUBJECT MULTIAPPEND URL-PARTIAL CATENATE UNSELECT CHILDREN NAMESPACE UIDPLUS LIST-EXTENDED I18NLEVEL=1 CONDSTORE QRESYNC ESEARCH ESORT SEARCHRES WITHIN CONTEXT=SEARCH LIST-STATUS BINARY MOVE SNIPPET=FUZZY PREVIEW=FUZZY LITERAL+ NOTIFY SPECIAL-USE QUOTA] Logged in\r\n"
+                xsend(c, send1)
+            elif cmds[1] == 'LIST':
+                send1 = '* LIST (\\HasNoChildren) "." "INBOX"' + "\r\n"
+                send1 += cmds[0] + " OK List completed.\r\n"
+                xsend(c, send1)
+            elif cmds[1] == 'LSUB':
+                send1 = '* LSUB (\\Noselect) "." INBOX' + "\r\n"
+                if o.recursive:
+                    reccount += 1
+                    if o.limitrecursion and reccount > 2000:
+                        sys.exit(1)
+                    send1 = '* LSUB () "." ' + cmds[3] + "\r\n"
+                send1 += cmds[0] + " OK fake lsub done\r\n"
+                xsend(c, send1)
+            elif cmds[1] == 'STATUS':
+                send1 = "* STATUS INBOX (MESSAGES 1 UIDNEXT 2 UIDVALIDITY 1581171240 UNSEEN 0)\r\n"
+                send1 += cmds[0] + " OK status\r\n"
+                xsend(c, send1)
+            elif cmds[1] == 'STARTTLS':
+                # bogus answer for evolution bug
+                xsend(c, cmds[0] + " OK x\r\n")
+            else:
+                xsend(c, cmds[0] + " BAD unknown.\r\n")
